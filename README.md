@@ -187,6 +187,15 @@ El script firma con `JWT_SECRET`, `JWT_ISSUER` y `JWT_AUDIENCE` del `.env`.
 
 ---
 
+## Demo en el navegador
+
+Con la app corriendo, abre **http://localhost:3000/demo/**. Es una página pequeña (`demo/index.html`) que la misma API sirve, solo fuera de producción, para no tener problemas de CORS. Tiene cuatro partes:
+
+- **Auth:** pega el JWT generado con el script, haz login y ejecuta el redeem dos veces (`200` y luego `401`).
+- **Payments:** paga con un `Idempotency-Key` (el botón "Nueva llave" genera uno).
+- **"Enviar 3 simultáneos":** manda tres pagos en paralelo con la misma llave y muestra si todos obtuvieron el mismo `coreReference`.
+- **Requests:** cada petición con su estado, tiempo y respuesta.
+
 ## Probar la API con Postman
 
 El repo incluye una colección lista para importar: `postman/backend-challenge.postman_collection.json`.

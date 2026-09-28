@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backend Challenge · Demo</title>
+<link rel="stylesheet" href="styles.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Backend Challenge · Demo</h1>
+    <p>Login de integración, token de un solo uso y pagos idempotentes.</p>
+  </header>
+
+  <section>
+    <h2>1. Auth</h2>
+    <label for="jwt">JWT de entrada</label>
+    <textarea id="jwt" placeholder="eyJhbGciOiJIUzI1NiJ9..."></textarea>
+    <p class="hint">Genéralo con <code>docker compose exec backend node scripts/generate-token.ts</code> (prueba también <code>--expired</code> o <code>--bad-signature</code>).</p>
+    <div class="actions">
+      <button id="login">Login integration</button>
+    </div>
+
+    <label for="integrationToken">Token de integración</label>
+    <input id="integrationToken" placeholder="se llena al hacer login">
+    <div class="actions">
+      <button id="redeem">Redeem</button>
+    </div>
+    <p class="hint">El primer redeem responde 200; el segundo, 401.</p>
+  </section>
+
+  <section>
+    <h2>2. Payments</h2>
+    <div class="row">
+      <div><label for="amount">Monto</label><input id="amount" type="number" step="0.01" value="10.50"></div>
+      <div><label for="currency">Moneda</label><input id="currency" value="USD" maxlength="3"></div>
+    </div>
+    <label for="key">Idempotency-Key</label>
+    <div class="row">
+      <input id="key">
+      <button id="newKey" class="secondary shrink">Nueva llave</button>
+    </div>
+    <div class="actions">
+      <button id="pay">Pagar</button>
+      <button id="payConcurrent">Enviar 3 simultáneos</button>
+    </div>
+    <p class="hint">Misma llave → mismo resultado y el core se llama una sola vez. Cambia el monto con la misma llave para ver el 422.</p>
+    <div id="summary" class="summary"></div>
+  </section>
+
+  <section class="log">
+    <header>
+      <h2>Requests</h2>
+      <button id="clear" class="secondary">Limpiar</button>
+    </header>
+    <div id="entries"><p class="empty">Todavía no hay requests.</p></div>
+  </section>
+</main>
+</body>
+</html>

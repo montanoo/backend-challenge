@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes } from 'crypto';
 import { IntegrationJwtVerifier } from './integration-jwt.verifier.js';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -28,6 +28,25 @@ export class AuthService {
     });
 
     return { integrationToken: token, expiresAt };
+  }
+
+  async redeemToken(integrationToken: string) {
+    const now = new Date();
+
+    const { count } = await this.prisma.integrationToken.updateMany({
+      where: {
+        tokenHash: this.hash(integrationToken),
+        usedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { usedAt: now },
+    });
+
+    if (count === 0) {
+      throw new UnauthorizedException('Invalid or already used token');
+    }
+
+    return { redeemed: true, redeemedAt: now };
   }
 
   private hash(token: string) {

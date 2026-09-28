@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import { SignJWT } from 'jose';
 
+config({ quiet: true });
+
 const args = new Set(process.argv.slice(2));
 const secret = args.has('--bad-signature')
   ? 'wrong-secret'

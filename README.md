@@ -12,130 +12,115 @@ API en NestJS con:
 
 ## Preguntas técnicas
 
-### 1. Operación intensiva en CPU dentro de un endpoint (por ejemplo, generar un PDF)
+### 1. Operación pesada de CPU en un endpoint (por ejemplo, generar un PDF)
 
-Debido a que Node ejecuta el codigo en un solo hilo, mientras el PDF esta siendo generado, el event loop está bloqueado y no puede realizar ninguna otra petición o procesar algo más.
+Node corre el código JavaScript en un solo hilo mientras se genera el PDF el event loop se queda bloqueado y el servidor no puede resolver ninguna otra petición.
 
-Cómo lo resolvería, de menor a mayor escala:
+Se puede aplicar lo siguiente:
 
-- **`worker_threads`** con un pool, el trabajo pesado corre en otros hilos y el event loop queda libre. 
-- **Cola + worker aparte** (BullMQ, RabbitMQ): el endpoint pone en cola el trabajo y responde `202 Accepted` con un `jobId`. Un servicio aparte genera el PDF y el cliente consulta el estado.
+- **`worker_threads`**: mover la generación del PDF a otro hilo (idealmente con un pool) para que el event loop siga libre.
+- Una cola con un worker aparte ****(por ejemplo BullMQ)
+
+Si el PDF tarda poco usaría `worker_threads`. Si es algo constante y que se procesa cada X tiempo (y multiples a la vez), me iría por la cola.
 
 ### 2. Middleware, guard, interceptor, pipe y exception filter en NestJS
 
-| Componente | Para qué sirve | Ejemplo |
-|---|---|---|
-| **Middleware** | Corre antes de que Nest resuelva la ruta, a nivel de Express. No sabe qué handler se va a ejecutar. | Logging de requests, CORS, `helmet`, request-id |
-| **Guard** | Decide si la petición puede continuar el flujo (devuelve `true` o `false`). Tiene acceso al `ExecutionContext` y a los metadatos del handler. | Autenticación, roles, permisos |
-| **Interceptor** | Envuelve al handler antes y despues (RxJS). Puede transformar la respuesta o cortar el flujo. | Medir tiempos, mapear respuestas, caché, timeouts |
-| **Pipe** | **Transforma o valida** los argumentos del handler. | `ValidationPipe` para los DTO; en este proyecto, `IdempotencyKeyPipe` |
-| **Exception filter** | Agarra las excepciones y genera la respuesta de error. | `AllExceptionsFilter` (el formato de error uniforme de este proyecto) |
+| Componente | Para qué lo uso | Ejemplo |
+| --- | --- | --- |
+| **Middleware** | Se ejecuta antes de llegar a la ruta, como en Express. | Logging, CORS, `helmet` |
+| **Guard** | Decide si la petición puede seguir o no (`true`/`false`). | Autenticación, roles |
+| **Interceptor** | Se ejecuta antes y después del handler. Sirve para modificar la respuesta. | Medir tiempos, transformar respuestas, caché |
+| **Pipe** | Valida o transforma los parámetros que recibe el handler. | `ValidationPipe` con DTOs; en este proyecto, `IdempotencyKeyPipe` |
+| **Exception filter** | Atrapa los errores y arma la respuesta de error. | `AllExceptionsFilter`, que usé para tener un formato de error uniforme |
 
-**Orden de ejecución:**
+**Orden en que se ejecutan:**
 
 ```
 Request → Middleware → Guards → Interceptors (antes) → Pipes → Handler → Interceptors (después) → Response
-                                    ↘ si algo lanza una excepción → Exception filters
+                                    ↘ si hay una excepción → Exception filters
 ```
 
-Dentro de cada tipo, el orden es global → controlador → ruta. Los filtros van al revés: primero el de la ruta, luego el del controlador y al final el global.
+Si hay varios del mismo tipo, van de global → controlador → ruta. Los exception filters van al revés (primero el de la ruta).
 
-### 3. Verificar un JWT emitido por otro sistema
+### 3. Verificar un JWT que emitió otro sistema
 
-Antes de confiar en el token verifico:
+Lo que se debería revisar antes de confiar en el token:
 
-- **La firma**, con la clave esperada. En HS256 es un secreto compartido. En RS256/ES256 es la clave pública del emisor.
-- **El algoritmo, con whitelist** (`algorithms: ['HS256']`). Nunca uso el `alg` del header.
-- **`exp` obligatorio**, y también `nbf`/`iat` si vienen, con una tolerancia de reloj pequeña.
-- **`iss`**: que lo emitió el sistema que espero.
-- **`aud`**: que el token es para **este** servicio.
-- Los claims que el negocio necesita (`sub`, scopes).
+- La firma, con el secreto (HS256) o la clave pública del emisor (RS256).
+- El algoritmo: le paso una lista fija (`algorithms: ['HS256']`) en vez de confiar en lo que diga el header.
+- **`exp`**, que sea obligatorio y no esté vencido.
+- **`iss`**, que venga del sistema que espero.
+- **`aud`**, que el token sea para este servicio.
 
-Errores comunes:
+Cosas que se debería evitar para tener vulnerabilidades en los tokens:
 
-- Usar `decode` en lugar de `verify`. 
-- No exigir `exp`: un token sin `exp` sería válido para siempre. Por eso este proyecto usa `requiredClaims: ['exp']`.
-- No validar `aud`, y aceptar tokens emitidos para otro servicio.
-- Secretos HS256 débiles o escritos en el código, que se pueden atacar por fuerza bruta.
-- Poner datos sensibles en el payload (solo está en base64, no cifrado) o escribir tokens en los logs.
-- Devolver errores distintos según la validación que falló. Aquí se responde siempre un `401` genérico.
+- Usar `decode` en lugar de `verify` (decode no valida nada).
+- No exigir `exp`. Por eso en el proyecto puse `requiredClaims: ['exp']`.
+- No validar `aud` y aceptar tokens hechos para otro servicio.
+- Tener el secreto en el código hardcodeado
+- Guardar datos sensibles en el payload, porque solo está en base64, no cifrado.
+- Dar mensajes de error distintos según qué falló. En el proyecto siempre devuelvo un `401` genérico.
 
 ### 4. Token de un solo uso con varias réplicas
 
-Hay dos condiciones: el estado tiene que estar **compartido** entre réplicas (nunca en un `Map` en memoria) y el consumo tiene que ser **atómico**.
+Lo importante es que el estado del token esté en un lugar compartido (no en memoria de cada réplica) y que marcarlo como usado sea una operación **atómica**.
 
-- **Postgres** (lo que hace este proyecto): un solo `UPDATE ... WHERE token_hash = ? AND used_at IS NULL AND expires_at > now()`, y revisar cuántas filas se actualizaron. Postgres bloquea la fila, así que solo una réplica consume el token aunque lleguen varias peticiones al mismo tiempo.
-- **Redis** (alternativa): guardar `SET token:<hash> 1 EX 3600` al emitirlo, y en el redeem usar `GETDEL` (o `DEL`, revisando si devuelve 1). Es atómico, rápido y expira solo. Requiere Redis con persistencia o replicación: si Redis pierde datos, un token podría usarse otra vez.
-- En los dos casos se guarda solo el **hash** del token y se compara la expiración con la hora de la base o de Redis, no con el reloj de cada réplica.
+- Con Postgres (lo que hice en el proyecto): un `UPDATE ... WHERE token_hash = ? AND used_at IS NULL AND expires_at > now()` y reviso cuántas filas se actualizaron. Si fue 0, el token ya se usó o expiró.
+- Con Redis locks (otra opción): guardar el token con `SET ... EX` y al usarlo hacer `GETDEL`. También es atómico y expira solo.
 
-Más detalle en [Qué cambiaría para varias réplicas](#qué-cambiaría-para-varias-réplicas).
+Más detalle en Qué cambiaría para varias réplicas.
 
-### 5. El core procesó el pago, pero recibimos un timeout
+### 5. El core procesó el pago pero recibimos un timeout
 
-El timeout **no significa que falló**. No se puede reintentar a ciegas (se cobraría dos veces) ni marcar el pago como fallido (el cliente sí pagó).
+Un timeout no significa que el pago falló, solo que no sabemos qué pasó. Si reintento sin cuidado puedo cobrar dos veces (ahí es donde entra la idempotencia, dos acciones iguales generan un mismo resultado), y si lo marco como fallido puede que el cliente sí haya pagado.
 
-1. Guardar el pago en un estado **`PENDING` o desconocido**, no `FAILED`.
-2. **Enviar siempre una llave de idempotencia al core** (por ejemplo, nuestro `Idempotency-Key` o el id del pago). Así el reintento es seguro: si el core ya lo procesó, devuelve el mismo resultado en lugar de cobrar otra vez.
-3. **Conciliar:** consultar al core el estado de esa operación. Un job en segundo plano revisa los pagos que se quedaron `PENDING`, y la conciliación diaria con los reportes del core es la última línea de defensa. Si nada lo resuelve, se genera una alerta para revisión manual.
-4. Al cliente se le responde "en proceso" (`202`), y cuando repita la petición con el mismo `Idempotency-Key` recibe el resultado final.
+Para resolver esto:
 
-En este proyecto, si el core respondió pero falla la escritura en base, la llave queda `IN_PROGRESS` a propósito, por el mismo principio: es preferible bloquear el reintento a arriesgar un segundo cobro.
+1. Dejaría el pago en estado `PENDING`, no `FAILED`.
+2. Mandaría siempre una llave de idempotencia al core, para que si reintento y ya estaba procesado, me devuelva el mismo resultado sin cobrar otra vez.
+3. Al cliente le respondo que está "en proceso" (`202`), y si repite la petición con el mismo `Idempotency-Key` recibe el resultado final.
 
-### 6. Enlace público a un comprobante que no se pueda adivinar ni reutilizar indefinidamente
+En el proyecto apliqué la misma idea: si el core responde pero falla el guardado en la base, la llave se queda en `IN_PROGRESS` a propósito, porque prefiero bloquear el reintento que arriesgar un doble cobro.
 
-- **Que no se pueda adivinar:** nunca usar el id secuencial (`/receipts/123`). Usar un token aleatorio de 256 bits (`crypto.randomBytes(32).toString('base64url')`) y guardar solo su hash, igual que el token de integración de este proyecto.
-- **Que no dure para siempre:** una fecha de expiración (por ejemplo, 72 h) y, si hace falta, un límite de usos o un solo uso, con el mismo `UPDATE` atómico. Revocarlo es borrar la fila.
-- **Alternativa sin estado:** una URL firmada, `HMAC(receiptId + exp, secreto)` en la query, como las presigned URLs de S3. No necesita base de datos, pero no se puede revocar antes de que expire.
-- **Al servirlo:** `Cache-Control: no-store`, `Referrer-Policy: no-referrer` (para que la URL no se filtre a terceros), `X-Robots-Tag: noindex`, rate limiting en el endpoint y no escribir la URL completa en los logs. El comprobante debe mostrar datos enmascarados.
-- Si el archivo está en un object storage, el enlace valida el token y redirige a una presigned URL de pocos minutos.
+### 6. Enlace público a un comprobante que no se pueda adivinar ni usar para siempre
 
-### 7. SMS por una cola con entrega "al menos una vez" sin duplicados
+- Que no se pueda adivinar**:** no usar el id de la base (`/receipts/123`), sino un token aleatorio (`crypto.randomBytes(32).toString('base64url')`) y guardar solo su hash.
+- Que expire**:** guardar una fecha de expiración (por ejemplo 72 horas) y, si hace falta, marcarlo como usado con el mismo `UPDATE` atómico de la pregunta 4.
 
-"Al menos una vez" significa que el mismo mensaje **puede llegar dos veces** (un reintento, un `ack` perdido, un consumidor que se cae). Lograr "exactamente una vez" de punta a punta no es posible; lo que se busca es un **consumidor idempotente**:
+### 7. Enviar SMS con una cola "al menos una vez" sin mandar duplicados
 
-1. Cada mensaje lleva una **llave de deduplicación** estable que asigna el productor (por ejemplo, `receiptId + canal`), no un id aleatorio por cada envío.
-2. Antes de enviar, el consumidor registra la llave en una tabla con `UNIQUE` (o `SET key NX EX <ttl>` en Redis). Si ya existe, el SMS ya se procesó: hace `ack` y lo descarta.
-3. Hace el `ack` **después** de registrar el envío, nunca antes.
-4. Queda una ventana: el SMS salió, pero el proceso se cayó antes de registrarlo. Para cubrirla se usa la llave de idempotencia del proveedor de SMS, si la ofrece, o un estado `SENDING` que se concilia con la API de estado del proveedor.
+Por "Al menos una vez" entiendo que el mismo mensaje puede llegar más de una vez (por un reintento o un `ack` que se perdió). Entonces el consumidor tiene que ser idempotente:
 
-Del lado del productor, el **patrón outbox** (guardar el evento en la misma transacción que el comprobante) evita tanto publicar el mensaje dos veces como perderlo.
+1. Cada mensaje trae una llave única que no cambia entre reintentos (por ejemplo `receiptId + canal`).
+2. Antes de enviar el SMS, el consumidor guarda esa llave en una tabla con `UNIQUE` (o en Redis con `SET NX`)
+3. El `ack` lo hago después de registrar el envío, no antes.
 
-### 8. Ejecutar un servicio Node.js en OpenShift
+### 8. Correr un servicio Node.js en OpenShift
 
 **Usuario**
 
-- OpenShift ejecuta los contenedores con un **UID aleatorio** (SCC `restricted`) que pertenece al grupo `0`. La imagen no puede depender de `root` ni de un UID fijo: los directorios donde la app escribe necesitan permisos de grupo (`chgrp -R 0 /app && chmod -R g=u /app`).
-- No se pueden usar puertos menores a 1024: la app escucha en `8080` o `3000`.
-- El `HOME` o la caché de npm pueden no tener permisos de escritura. Hay que arrancar con `node dist/main.js` directamente, no con `npm start`. Así, además, `SIGTERM` llega a Node y el apagado es ordenado (`enableShutdownHooks()` en este proyecto).
+- OpenShift corre los contenedores con un usuario aleatorio (no root), así que la imagen no puede depender de root. Las carpetas donde la app escribe necesitan permisos para el grupo `0`.
+- No se pueden usar puertos menores a 1024, por eso la app escucha en `3000` u `8080`.
+- Arranco con `node dist/main.js` en vez de `npm start`, para que la señal `SIGTERM` le llegue directo a Node y se apague bien (en el proyecto uso `enableShutdownHooks()`).
 
 **Probes**
 
-- **Liveness:** "¿el proceso está vivo?". Tiene que ser barata y **no depender de la base**; si dependiera, una caída de Postgres reiniciaría todos los pods sin necesidad.
-- **Readiness:** "¿puede recibir tráfico?". Esta sí revisa las dependencias (la base) y saca al pod del Service mientras arranca, se sobrecarga o se está apagando.
-- **Startup:** para arranques lentos, por ejemplo cuando se corren migraciones, para que la liveness no mate al pod antes de que termine de iniciar.
-- Un event loop bloqueado (pregunta 1) hace fallar las probes. `@nestjs/terminus` sirve para exponer `/health`.
+- **Liveness:** revisa si el proceso sigue vivo. No debería depender de la base, porque si Postgres se cae se reiniciarían todos los pods sin razón.
+- **Readiness:** revisa si el pod puede recibir tráfico, aquí sí reviso la conexión a la base.
+- **Startup:** útil si la app tarda en arrancar, para que la liveness no la mate antes de tiempo.
+- Para el endpoint `/health` se puede usar `@nestjs/terminus`.
 
 **ConfigMaps**
 
-- Configuración **no sensible**: `JWT_ISSUER`, `JWT_AUDIENCE`, `CORE_DELAY_MS`, el TTL. Se inyectan como variables de entorno o como archivos montados.
-- Cambiar un ConfigMap no reinicia el pod: hace falta un `rollout restart`.
-- Validar la configuración al arrancar y fallar de inmediato si falta algo (aquí lo hace `getOrThrow`).
+- Para configuración que no es secreta: `JWT_ISSUER`, `JWT_AUDIENCE`, `CORE_DELAY_MS`, etc.
+- Si cambio un ConfigMap, el pod no se reinicia solo; hay que hacer un `rollout restart`.
+- La app valida la configuración al arrancar y falla si falta algo (en el proyecto con `getOrThrow`).
 
 **Secrets**
 
-- `JWT_SECRET` y las credenciales de la base.
-- Un Secret está en **base64, no cifrado**: hay que limitar el acceso con RBAC, activar el cifrado de etcd o usar un gestor externo (Vault, External Secrets, Sealed Secrets).
-- Es preferible montarlos como archivos en lugar de variables de entorno, porque estas se filtran en dumps, logs y procesos hijos.
-- Nunca incluirlos en la imagen (aquí `.dockerignore` excluye `.env`).
-
-**Además**
-
-- Definir `requests`/`limits` de CPU y memoria, y ajustar `--max-old-space-size` al límite de memoria.
-- Un proceso por contenedor (sin `cluster`): se escala con réplicas o con un HPA.
-- Logs en JSON por stdout.
-- Imagen multi-stage con solo las dependencias de producción, y las migraciones como un `Job` o `initContainer` separado.
-
----
+- Para `JWT_SECRET` y las credenciales de la base.
+- Los Secrets solo están en base64, así que hay que limitar quién tiene acceso a ellos.
+- Nunca meterlos en la imagen (por eso el `.dockerignore` excluye el `.env`).---
 
 ## Cómo ejecutarlo
 

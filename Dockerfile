@@ -12,7 +12,7 @@ RUN pnpm install --frozen-lockfile
 FROM deps AS dev
 COPY . .
 EXPOSE 3000
-CMD ["sh", "-c", "pnpm prisma generate && pnpm start:dev"]
+CMD ["sh", "-c", "pnpm prisma migrate deploy && pnpm prisma generate && pnpm start:dev"]
 
 FROM deps AS build
 COPY . .

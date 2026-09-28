@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { config } from 'dotenv';
 import { SignJWT } from 'jose';
 
 config({ quiet: true });
